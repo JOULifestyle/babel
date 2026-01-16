@@ -332,6 +332,204 @@ class CurveRenderUnit(RenderUnit):
         draw_op.append(b" n Q\n")
 
 
+class ImageRenderUnit(RenderUnit):
+    """Render unit for PDF images."""
+
+    def __init__(
+        self,
+        image: il_version_1.PdfImage,
+        render_order: int,
+        sub_render_order: int = 0,
+    ):
+        super().__init__(render_order, sub_render_order, image.xobj_id)
+        self.image = image
+
+    def render(self, draw_op: BitStream, context: "RenderContext") -> None:
+        image = self.image
+        try:
+            # Decode base64 image data
+            import base64
+            image_bytes = base64.b64decode(image.image_data)
+
+            # Calculate dimensions
+            width = image.box.x2 - image.box.x
+            height = image.box.y2 - image.box.y
+
+            # Create image matrix for positioning
+            # Translate to position, then scale to size
+            image_matrix = (
+                width, 0, 0, height,
+                image.box.x, image.box.y
+            )
+
+            draw_op.append(b"q ")
+            draw_op.append(matrix_to_bytes(image_matrix))
+            draw_op.append(b" ")
+
+            # Start inline image
+            draw_op.append(b"BI ")
+            draw_op.append(f"/Width {int(width)} ".encode())
+            draw_op.append(f"/Height {int(height)} ".encode())
+            draw_op.append(f"/ColorSpace /DeviceRGB ".encode())
+            draw_op.append(b"/BitsPerComponent 8 ")
+            draw_op.append(b"ID ")
+            draw_op.append(image_bytes)
+            draw_op.append(b" EI Q\n")
+
+        except Exception as e:
+            logger.warning("Failed to render image: %s", e)
+
+
+class DrawingRenderUnit(RenderUnit):
+    """Render unit for PDF drawings using PyMuPDF drawing commands."""
+
+    def __init__(
+        self,
+        drawing: il_version_1.PdfDrawing,
+        render_order: int,
+        sub_render_order: int = 0,
+    ):
+        super().__init__(render_order, sub_render_order, drawing.xobj_id)
+        self.drawing = drawing
+
+    def render(self, draw_op: BitStream, context: "RenderContext") -> None:
+        drawing = self.drawing
+        try:
+            # Parse the drawing data back from string
+            import ast
+            drawing_data = ast.literal_eval(drawing.drawing_commands)
+
+            draw_op.append(b"q n ")
+
+            draw_op.append(
+                drawing.graphic_state.passthrough_per_char_instruction.encode(),
+            )
+
+            draw_op.append(b" ")
+
+            # Convert drawing items to PDF commands
+            commands = []
+            current_point = None
+
+            for item in drawing_data.get("items", []):
+                if len(item) < 2:
+                    continue
+
+                op = item[0]
+                args = item[1:]
+
+                if op == "l":  # line to
+                    if len(args) >= 2:
+                        commands.append(f"{args[0]:.6f} {args[1]:.6f} l")
+                        current_point = (args[0], args[1])
+                elif op == "c":  # curve to
+                    if len(args) >= 6:
+                        commands.append(f"{args[0]:.6f} {args[1]:.6f} {args[2]:.6f} {args[3]:.6f} {args[4]:.6f} {args[5]:.6f} c")
+                        current_point = (args[4], args[5])
+                elif op == "m":  # move to
+                    if len(args) >= 2:
+                        commands.append(f"{args[0]:.6f} {args[1]:.6f} m")
+                        current_point = (args[0], args[1])
+                elif op == "h":  # close path
+                    commands.append("h")
+                elif op == "re":  # rectangle
+                    if len(args) >= 4:
+                        commands.append(f"{args[0]:.6f} {args[1]:.6f} {args[2]:.6f} {args[3]:.6f} re")
+                elif op == "q":  # quadratic curve (convert to cubic)
+                    if len(args) >= 4:
+                        # Convert quadratic to cubic bezier
+                        x0, y0, x1, y1, x2, y2 = args[:6]
+                        # Simple conversion (this is approximate)
+                        cx1 = x0 + (x1 - x0) * 2/3
+                        cy1 = y0 + (y1 - y0) * 2/3
+                        cx2 = x2 + (x1 - x2) * 2/3
+                        cy2 = y2 + (y1 - y2) * 2/3
+                        commands.append(f"{cx1:.6f} {cy1:.6f} {cx2:.6f} {cy2:.6f} {x2:.6f} {y2:.6f} c")
+                        current_point = (x2, y2)
+
+            if commands:
+                draw_op.append(" ".join(commands).encode())
+                draw_op.append(b" ")
+
+                # Apply fill/stroke based on drawing properties
+                fill = drawing_data.get("fill")
+                color = drawing_data.get("color")
+
+                if fill and color:
+                    draw_op.append(b"f")  # fill
+                elif color:
+                    draw_op.append(b"S")  # stroke
+                else:
+                    draw_op.append(b"n")  # neither
+
+            draw_op.append(b" Q\n")
+
+        except Exception as e:
+            logger.warning(f"Failed to render drawing: {e}")
+            # Fallback: just close the graphics state
+            draw_op.append(b" Q\n")
+
+
+class TextLogoRenderUnit(RenderUnit):
+    """Render unit for PDF text logos."""
+
+    def __init__(
+        self,
+        text_logo: il_version_1.PdfTextLogo,
+        render_order: int,
+        sub_render_order: int = 0,
+    ):
+        super().__init__(render_order, sub_render_order, text_logo.xobj_id)
+        self.text_logo = text_logo
+
+    def render(self, draw_op: BitStream, context: "RenderContext") -> None:
+        text_logo = self.text_logo
+        text = text_logo.text
+        if not text:
+            return
+
+        logger.info(f"Rendering text logo: '{text}' at ({text_logo.box.x}, {text_logo.box.y})")
+
+        char_size = text_logo.pdf_style.font_size
+        font_id = text_logo.pdf_style.font_id
+
+        # Get encoding length map based on xobj_id
+        if self.xobj_id in context.xobj_encoding_length_map:
+            encoding_length_map = context.xobj_encoding_length_map[self.xobj_id]
+        else:
+            encoding_length_map = context.page_encoding_length_map
+
+        draw_op.append(b"q ")
+        context.pdf_creator.render_graphic_state(draw_op, text_logo.pdf_style.graphic_state)
+
+        # Position the text
+        draw_op.append(
+            f"BT /{font_id} {char_size:f} Tf 1 0 0 1 {text_logo.box.x:f} {text_logo.box.y:f} Tm ".encode(),
+        )
+
+        encoding_length = encoding_length_map.get(font_id, None)
+        if encoding_length is None:
+            if font_id in context.all_encoding_length_map:
+                encoding_length = context.all_encoding_length_map[font_id]
+            else:
+                logger.debug(
+                    f"Font {font_id} not found in encoding length map for page {context.page.page_number}"
+                )
+                return
+
+        # For text logos, we need to encode each character
+        hex_parts = []
+        for char in text:
+            char_code = ord(char)
+            hex_parts.append(f"{char_code:0{encoding_length * 2}x}")
+
+        full_hex = "".join(hex_parts).upper()
+        draw_op.append(f"<{full_hex}>".encode())
+        logger.debug(f"Text logo PDF command: <{full_hex}> Tj for text '{text}'")
+
+        draw_op.append(b" Tj ET Q \n")
+
+
 class RenderContext:
     """Context object containing shared state for rendering."""
 
@@ -745,6 +943,31 @@ class PDFCreater:
                     render_units.append(
                         CurveRenderUnit(curve, render_order, sub_render_order)
                     )
+
+        # Convert images to render units
+        for i, image in enumerate(page.pdf_image):
+            render_order = getattr(image, "render_order", 30)  # Images render after curves
+            sub_render_order = getattr(image, "sub_render_order", i)
+            render_units.append(
+                ImageRenderUnit(image, render_order, sub_render_order)
+            )
+
+        # Convert drawings to render units
+        for i, drawing in enumerate(page.pdf_drawing):
+            render_order = getattr(drawing, "render_order", 25)  # Drawings render after curves, before images
+            sub_render_order = getattr(drawing, "sub_render_order", i)
+            render_units.append(
+                DrawingRenderUnit(drawing, render_order, sub_render_order)
+            )
+
+        # Convert text logos to render units
+        for i, text_logo in enumerate(page.pdf_text_logo):
+            logger.info(f"Creating render unit for text logo: '{text_logo.text}'")
+            render_order = getattr(text_logo, "render_order", 35)  # Text logos render after images
+            sub_render_order = getattr(text_logo, "sub_render_order", i)
+            render_units.append(
+                TextLogoRenderUnit(text_logo, render_order, sub_render_order)
+            )
 
         return render_units
 

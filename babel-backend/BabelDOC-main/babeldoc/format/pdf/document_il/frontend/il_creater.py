@@ -560,6 +560,9 @@ class ILCreater:
             page_layout=[],
             pdf_curve=[],
             pdf_form=[],
+            pdf_image=[],
+            pdf_drawing=[],
+            pdf_text_logo=[],
             # currently don't support UserUnit page parameter
             # pdf32000 page 79
             unit="point",
@@ -577,6 +580,10 @@ class ILCreater:
         self._page_valid_chars_buffer = []
 
     def on_page_end(self):
+        # Extract images and drawings from the current page
+        self.extract_page_images_and_drawings()
+        # Post-process characters to detect text logos that span multiple characters
+        self._post_process_text_logos()
         # Accumulate this page's valid characters and tokens into shared context
         try:
             if (
@@ -600,6 +607,364 @@ class ILCreater:
         finally:
             self._page_valid_chars_buffer = []
         self.progress.advance(1)
+
+    def extract_page_images_and_drawings(self):
+        """Extract raster images, vector drawings, and text logos from the current page."""
+        try:
+            # Get the current page from PyMuPDF document
+            page = self.mupdf[self.current_page.page_number]
+
+            # Extract raster images
+            self.extract_raster_images(page)
+
+            # Extract vector drawings
+            self.extract_vector_drawings(page)
+
+            # Extract text logos using PyMuPDF's structured text extraction
+            self.extract_text_logos(page)
+
+        except Exception as e:
+            logger.warning("Failed to extract images and drawings from page %d: %s",
+                           self.current_page.page_number, e)
+
+    def extract_raster_images(self, page):
+        """Extract raster images from the page using PyMuPDF with robust error handling."""
+        try:
+            seen_images = set()  # Track images by (page, bbox) to avoid duplicates
+
+            images = page.get_images(full=True)
+            for img_index, img_info in enumerate(images):
+                try:
+                    xref = img_info[0]
+                    bbox = page.get_image_bbox(img_info)
+                    if bbox is None:
+                        continue
+
+                    # Check for duplicate images
+                    image_key = (self.current_page.page_number, tuple(bbox))
+                    if image_key in seen_images:
+                        continue
+                    seen_images.add(image_key)
+
+                    # Try multiple approaches for problematic images
+                    img_bytes = None
+                    pix = None
+
+                    try:
+                        pix = pymupdf.Pixmap(self.mupdf, xref)
+
+                        if pix.colorspace is None:
+                            # Try to handle images with no colorspace
+                            try:
+                                if pix.n >= 3:  # Has color channels
+                                    pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+                                elif pix.n == 1:  # Grayscale
+                                    pix = pymupdf.Pixmap(pymupdf.csGRAY, pix)
+                                else:
+                                    # Try direct RGB conversion
+                                    pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+                            except:
+                                # If all conversions fail, try to extract raw data
+                                try:
+                                    img_stream = self.mupdf.extract_image(xref)
+                                    if img_stream and 'image' in img_stream:
+                                        img_bytes = img_stream['image']
+                                        logger.info(f"Extracted raw image data for problematic image on page {self.current_page.page_number}")
+                                except:
+                                    logger.warning(f"Skipping image on page {self.current_page.page_number}: cannot extract raw data")
+                                    continue
+                        elif pix.n < 5:  # Convert to RGB if necessary
+                            pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+
+                        # If we have a pixmap, convert to bytes
+                        if pix and not img_bytes:
+                            img_bytes = pix.tobytes("png")
+
+                    except Exception as pix_error:
+                        # Try alternative extraction method
+                        try:
+                            img_stream = self.mupdf.extract_image(xref)
+                            if img_stream and 'image' in img_stream:
+                                img_bytes = img_stream['image']
+                                logger.info(f"Extracted image using alternative method on page {self.current_page.page_number}")
+                            else:
+                                logger.warning(f"Skipping image on page {self.current_page.page_number}: no extractable data - {pix_error}")
+                                continue
+                        except Exception as alt_error:
+                            logger.warning(f"Skipping image on page {self.current_page.page_number}: all extraction methods failed - {alt_error}")
+                            continue
+
+                    if img_bytes:
+                        # Convert to base64
+                        import base64
+                        encoded_data = base64.b64encode(img_bytes).decode("ascii")
+
+                        # Determine format (prefer PNG for consistency)
+                        image_format = "PNG"
+
+                        # Create IL image object
+                        pdf_image = il_version_1.PdfImage(
+                            box=il_version_1.Box(
+                                x=float(bbox.x0),
+                                y=float(bbox.y0),
+                                x2=float(bbox.x1),
+                                y2=float(bbox.y1),
+                            ),
+                            image_data=encoded_data,
+                            image_format=image_format,
+                            xobj_id=self.xobj_id,
+                            render_order=self.get_render_order_and_increase(),
+                        )
+
+                        self.current_page.pdf_image.append(pdf_image)
+                        logger.info(f"Extracted image on page {self.current_page.page_number} at {bbox}")
+
+                    if pix:
+                        pix = None  # Free memory
+
+                except Exception as e:
+                    logger.warning("Failed to extract image %d: %s", img_index, e)
+
+        except Exception as e:
+            logger.warning("Failed to extract raster images: %s", e)
+
+    def extract_vector_drawings(self, page):
+        """Extract vector drawings from the page using PyMuPDF."""
+        try:
+            drawings = page.get_drawings()
+            if drawings:
+                logger.info(f"Found {len(drawings)} drawings on page {self.current_page.page_number}")
+
+            for drawing_index, drawing in enumerate(drawings):
+                try:
+                    # Create IL drawing object with the full drawing data
+                    # We'll store the drawing data and handle rendering in pdf_creater.py
+                    pdf_drawing = il_version_1.PdfDrawing(
+                        box=il_version_1.Box(
+                            x=float(drawing.get("rect", pymupdf.Rect(0, 0, 0, 0)).x0),
+                            y=float(drawing.get("rect", pymupdf.Rect(0, 0, 0, 0)).y0),
+                            x2=float(drawing.get("rect", pymupdf.Rect(0, 0, 0, 0)).x1),
+                            y2=float(drawing.get("rect", pymupdf.Rect(0, 0, 0, 0)).y1),
+                        ),
+                        graphic_state=self.create_graphic_state(
+                            self.passthrough_per_char_instruction, include_clipping=True
+                        ),
+                        drawing_commands=str(drawing),  # Store the full drawing dict as string
+                        xobj_id=self.xobj_id,
+                        render_order=self.get_render_order_and_increase(),
+                    )
+
+                    self.current_page.pdf_drawing.append(pdf_drawing)
+                    logger.info(f"Extracted drawing {drawing_index} on page {self.current_page.page_number}")
+
+                except Exception as e:
+                    logger.warning("Failed to extract drawing %d: %s", drawing_index, e)
+
+        except Exception as e:
+            logger.warning("Failed to extract vector drawings: %s", e)
+
+    def extract_text_logos(self, page):
+        """Extract text logos using PyMuPDF's structured text extraction."""
+        try:
+            # Get full page text for reference
+            full_text = page.get_text()
+            text_dict = page.get_text("dict")
+
+            seen_texts = set()  # Track text content to avoid duplicates
+
+            for block in text_dict["blocks"]:
+                if block["type"] == 0:  # Text block
+                    for line in block["lines"]:
+                        spans = line["spans"]
+                        if not spans:
+                            continue
+
+                        # Group consecutive spans with the same style
+                        grouped_spans = []
+                        current_group = [spans[0]]
+                        current_bold = self._is_bold_span(spans[0])
+                        current_italic = self._is_italic_span(spans[0])
+                        current_size = spans[0]["size"]
+
+                        for span in spans[1:]:
+                            bold = self._is_bold_span(span)
+                            italic = self._is_italic_span(span)
+                            size = span["size"]
+                            if bold == current_bold and italic == current_italic and size == current_size:
+                                current_group.append(span)
+                            else:
+                                grouped_spans.append((current_group, current_bold, current_italic, current_size))
+                                current_group = [span]
+                                current_bold = bold
+                                current_italic = italic
+                                current_size = size
+                        grouped_spans.append((current_group, current_bold, current_italic, current_size))
+
+                        # Now create elements for each group
+                        for group, bold, italic, size in grouped_spans:
+                            group_text = "".join(span["text"] for span in group)
+                            text = group_text.strip()
+                            if not text:
+                                continue
+
+                            # Fix truncated text
+                            text = self._fix_truncated_text(text, full_text)
+
+                            # Skip duplicates and significant substring overlaps
+                            skip_element = False
+                            if text in seen_texts:
+                                skip_element = True
+                            else:
+                                # Check if this text significantly overlaps with existing text
+                                for seen_text in seen_texts:
+                                    if text in seen_text and len(text) > 10:
+                                        overlap_ratio = len(text) / len(seen_text)
+                                        if overlap_ratio > 0.5:
+                                            skip_element = True
+                                            break
+
+                            if skip_element:
+                                continue
+
+                            seen_texts.add(text)
+
+                            # Check if this is a logo
+                            if self._is_text_logo_from_pymupdf(text, size):
+                                # Calculate bounding box for the entire group
+                                min_x = min(span["bbox"][0] for span in group)
+                                min_y = min(span["bbox"][1] for span in group)
+                                max_x = max(span["bbox"][2] for span in group)
+                                max_y = max(span["bbox"][3] for span in group)
+
+                                # Create graphics state
+                                gs = self.create_graphic_state(
+                                    self.passthrough_per_char_instruction, include_clipping=True
+                                )
+
+                                bbox = il_version_1.Box(x=min_x, y=min_y, x2=max_x, y2=max_y)
+
+                                pdf_style = il_version_1.PdfStyle(
+                                    font_id=f"pymupdf_font_{size}_{bold}_{italic}",
+                                    font_size=size,
+                                    graphic_state=gs,
+                                )
+
+                                # Create text logo object
+                                text_logo = il_version_1.PdfTextLogo(
+                                    box=bbox,
+                                    pdf_style=pdf_style,
+                                    text=text,
+                                    xobj_id=self.xobj_id,
+                                    render_order=self.get_render_order_and_increase(),
+                                )
+
+                                self.current_page.pdf_text_logo.append(text_logo)
+                                logger.info(f"Extracted text logo: '{text}' at ({bbox.x}, {bbox.y})")
+
+        except Exception as e:
+            logger.warning("Failed to extract text logos: %s", e)
+
+    def _is_bold_span(self, span):
+        """Check if a span is bold."""
+        return (("Bold" in span["font"]) or
+                ("-B" in span["font"]) or
+                (span["font"].endswith("B")) or
+                (span["flags"] & 16))
+
+    def _is_italic_span(self, span):
+        """Check if a span is italic."""
+        return (("Italic" in span["font"]) or
+                ("-I" in span["font"]) or
+                (span["font"].endswith("I")) or
+                (span["flags"] & 2))
+
+    def _fix_truncated_text(self, truncated_text, full_page_text):
+        """Try to find the complete text for a truncated string."""
+        if len(truncated_text) < 10:
+            return truncated_text
+
+        pos = full_page_text.find(truncated_text)
+        if pos == -1:
+            return truncated_text
+
+        start_pos = pos
+        end_pos = pos + len(truncated_text) + 50
+        if end_pos > len(full_page_text):
+            end_pos = len(full_page_text)
+
+        extended_text = full_page_text[start_pos:end_pos]
+        lines = extended_text.split('\n')
+        if lines and len(lines[0]) > len(truncated_text):
+            complete_text = lines[0].strip()
+            return complete_text
+
+        return truncated_text
+
+    def _is_text_logo_from_pymupdf(self, text, size):
+        """Determine if text should be treated as a logo based on PyMuPDF extraction."""
+        if not text or len(text.strip()) == 0:
+            return False
+
+        # Known publisher names that should be preserved as logos
+        publisher_logos = [
+            "APPLIED ENERGY", "APPLIED", "ENERGY", "ELSEVIER", "SCIENCEDIRECT", "SCIENCE DIRECT",
+            "NATURE", "IEEE", "ACM", "SPRINGER", "WILEY", "TAYLOR & FRANCIS"
+        ]
+
+        text_upper = text.upper().strip()
+        if text_upper in publisher_logos:
+            return True
+
+        # Check for large font size (logos are typically larger)
+        if size > 12:  # Lower threshold for large text
+            if (text_upper == text.strip() and  # All caps
+                len(text.strip()) > 1 and  # Not too short
+                not any(c.isdigit() for c in text)):  # No numbers
+                return True
+
+        return False
+
+    def convert_drawing_to_pdf_commands(self, items):
+        """Convert PyMuPDF drawing items to PDF drawing commands."""
+        commands = []
+        try:
+            for item in items:
+                if len(item) < 2:
+                    continue
+
+                op = item[0]
+                args = item[1:]
+
+                if op == "l":  # line to
+                    if len(args) >= 2:
+                        commands.append(f"{args[0]:.6f} {args[1]:.6f} l")
+                elif op == "c":  # curve to
+                    if len(args) >= 6:
+                        commands.append(f"{args[0]:.6f} {args[1]:.6f} {args[2]:.6f} {args[3]:.6f} {args[4]:.6f} {args[5]:.6f} c")
+                elif op == "m":  # move to
+                    if len(args) >= 2:
+                        commands.append(f"{args[0]:.6f} {args[1]:.6f} m")
+                elif op == "h":  # close path
+                    commands.append("h")
+                elif op == "re":  # rectangle
+                    if len(args) >= 4:
+                        commands.append(f"{args[0]:.6f} {args[1]:.6f} {args[2]:.6f} {args[3]:.6f} re")
+                elif op == "q":  # quadratic curve (convert to cubic)
+                    if len(args) >= 4:
+                        # Convert quadratic to cubic bezier
+                        x0, y0, x1, y1, x2, y2 = args[:6]
+                        # Simple conversion (this is approximate)
+                        cx1 = x0 + (x1 - x0) * 2/3
+                        cy1 = y0 + (y1 - y0) * 2/3
+                        cx2 = x2 + (x1 - x2) * 2/3
+                        cy2 = y2 + (y1 - y2) * 2/3
+                        commands.append(f"{cx1:.6f} {cy1:.6f} {cx2:.6f} {cy2:.6f} {x2:.6f} {y2:.6f} c")
+
+            return " ".join(commands) if commands else ""
+
+        except Exception as e:
+            logger.warning("Failed to convert drawing commands: %s", e)
+            return ""
 
     def on_page_crop_box(
         self,
@@ -879,9 +1244,21 @@ class ILCreater:
                 "Failed to get rotation angle for char %s",
                 char.get_text(),
             )
+
+        char_unicode = char.get_text()
+
+        # For now, let's collect all large text and see what we get
+        if char.size > 12 and char_unicode.strip():
+            logger.info(f"Large text detected: '{char_unicode}' (size: {char.size}, pos: {char.bbox})")
+
+        # Check if this text should be treated as a logo
+        if self._is_text_logo(char, char_unicode):
+            self._process_text_logo(char, char_unicode)
+            return
+
         # Collect valid characters for statistics
         try:
-            self._collect_valid_char(char.get_text())
+            self._collect_valid_char(char_unicode)
         except Exception as e:
             logger.warning("Error collecting valid char: %s", e)
         gs = self.create_graphic_state(char.graphicstate)
@@ -1348,3 +1725,201 @@ class ILCreater:
 
         # Add to current page
         self.current_page.pdf_form.append(pdf_form)
+
+    def _is_text_logo(self, char: LTChar, text: str) -> bool:
+        """Determine if text should be treated as a logo based on various criteria."""
+        if not text or len(text.strip()) == 0:
+            return False
+
+        # Known publisher names that should be preserved as logos
+        publisher_logos = [
+            "APPLIED ENERGY", "APPLIED", "ENERGY", "ELSEVIER", "SCIENCEDIRECT", "SCIENCE DIRECT",
+            "NATURE", "IEEE", "ACM", "SPRINGER", "WILEY", "TAYLOR & FRANCIS"
+        ]
+
+        # Check for exact matches with known publishers
+        text_upper = text.upper().strip()
+        if text_upper in publisher_logos:
+            logger.info(f"Detected known publisher logo: {text_upper}")
+            return True
+
+        # Check for large font size (logos are typically larger)
+        if char.size > 10:  # Even lower threshold for large text
+            # Additional criteria for logo-like text
+            if (text_upper == text.strip() and  # All caps
+                len(text.strip()) > 1 and  # Not too short
+                not any(c.isdigit() for c in text)):  # No numbers (likely not page numbers)
+                logger.info(f"Detected logo-like text: '{text}' (size: {char.size})")
+                return True
+
+        return False
+
+    def _process_text_logo(self, char: LTChar, text: str):
+        """Process text that has been identified as a logo."""
+        try:
+            gs = self.create_graphic_state(char.graphicstate)
+
+            # Get font from current page or xobject
+            font = None
+            for pdf_font in self.xobj_map.get(char.xobj_id, self.current_page).pdf_font:
+                if pdf_font.font_id == char.aw_font_id:
+                    font = pdf_font
+                    break
+
+            # Get descent from font
+            descent = 0
+            if font and hasattr(font, "descent"):
+                descent = font.descent * char.size / 1000
+
+            bbox = il_version_1.Box(
+                x=char.bbox[0],
+                y=char.bbox[1],
+                x2=char.bbox[2],
+                y2=char.bbox[3],
+            )
+
+            if char.matrix[0] == 0 and char.matrix[3] == 0:
+                vertical = True
+                visual_bbox = il_version_1.Box(
+                    x=char.bbox[0] - descent,
+                    y=char.bbox[1],
+                    x2=char.bbox[2] - descent,
+                    y2=char.bbox[3],
+                )
+            else:
+                vertical = False
+                visual_bbox = il_version_1.Box(
+                    x=char.bbox[0],
+                    y=char.bbox[1] + descent,
+                    x2=char.bbox[2],
+                    y2=char.bbox[3] + descent,
+                )
+
+            pdf_style = il_version_1.PdfStyle(
+                font_id=char.aw_font_id,
+                font_size=char.size,
+                graphic_state=gs,
+            )
+
+            # Create text logo object
+            text_logo = il_version_1.PdfTextLogo(
+                box=bbox,
+                pdf_style=pdf_style,
+                text=text,
+                xobj_id=char.xobj_id,
+                render_order=self.get_render_order_and_increase(),
+            )
+
+            self.current_page.pdf_text_logo.append(text_logo)
+            logger.info(f"Added text logo: '{text}' at position ({text_logo.box.x}, {text_logo.box.y})")
+
+        except Exception as e:
+            logger.warning("Failed to process text logo '%s': %s", text, e)
+
+    def _post_process_text_logos(self):
+        """Post-process characters to detect text logos that span multiple characters."""
+        try:
+            # Group characters by similar properties (font, size, position)
+            char_groups = {}
+            for char in self.current_page.pdf_character:
+                if char.pdf_style.font_size > 10:  # Only consider large text
+                    key = (
+                        char.pdf_style.font_id,
+                        round(char.pdf_style.font_size, 1),
+                        round(char.box.y, 1),  # Same line
+                        char.xobj_id
+                    )
+                    if key not in char_groups:
+                        char_groups[key] = []
+                    char_groups[key].append(char)
+
+            # Process each group to find logo text
+            for group_key, chars in char_groups.items():
+                if len(chars) < 2:  # Need at least 2 characters for a logo
+                    continue
+
+                # Sort characters by x position
+                chars.sort(key=lambda c: c.box.x)
+
+                # Build text from consecutive characters
+                current_text = ""
+                current_chars = []
+                last_x_end = None
+
+                for char in chars:
+                    char_text = char.char_unicode.strip()
+                    if not char_text:
+                        continue
+
+                    # Check if this character is consecutive with the previous
+                    if (last_x_end is None or
+                        abs(char.box.x - last_x_end) < char.pdf_style.font_size * 0.5):  # Allow some spacing
+                        current_text += char_text
+                        current_chars.append(char)
+                    else:
+                        # Process the current text group
+                        if current_text and len(current_text) > 1:
+                            self._check_and_create_text_logo(current_text, current_chars)
+                        # Start new group
+                        current_text = char_text
+                        current_chars = [char]
+
+                    last_x_end = char.box.x2
+
+                # Process the last group
+                if current_text and len(current_text) > 1:
+                    self._check_and_create_text_logo(current_text, current_chars)
+
+        except Exception as e:
+            logger.warning("Failed to post-process text logos: %s", e)
+
+    def _check_and_create_text_logo(self, text: str, chars: list):
+        """Check if text forms a logo and create it if so."""
+        try:
+            # Known publisher names that should be preserved as logos
+            publisher_logos = [
+                "APPLIED ENERGY", "APPLIED", "ENERGY", "ELSEVIER", "SCIENCEDIRECT", "SCIENCE DIRECT",
+                "NATURE", "IEEE", "ACM", "SPRINGER", "WILEY", "TAYLOR & FRANCIS"
+            ]
+
+            text_upper = text.upper().strip()
+            if text_upper in publisher_logos:
+                logger.info(f"Detected multi-character logo: '{text_upper}'")
+
+                # Calculate bounding box for the entire text
+                min_x = min(c.box.x for c in chars)
+                min_y = min(c.box.y for c in chars)
+                max_x2 = max(c.box.x2 for c in chars)
+                max_y2 = max(c.box.y2 for c in chars)
+
+                # Use the first character's style
+                first_char = chars[0]
+                gs = first_char.pdf_style.graphic_state
+
+                bbox = il_version_1.Box(x=min_x, y=min_y, x2=max_x2, y2=max_y2)
+
+                pdf_style = il_version_1.PdfStyle(
+                    font_id=first_char.pdf_style.font_id,
+                    font_size=first_char.pdf_style.font_size,
+                    graphic_state=gs,
+                )
+
+                # Create text logo object
+                text_logo = il_version_1.PdfTextLogo(
+                    box=bbox,
+                    pdf_style=pdf_style,
+                    text=text,
+                    xobj_id=first_char.xobj_id,
+                    render_order=self.get_render_order_and_increase(),
+                )
+
+                self.current_page.pdf_text_logo.append(text_logo)
+                logger.info(f"Created multi-character text logo: '{text}' at ({bbox.x}, {bbox.y})")
+
+                # Remove the individual characters that form this logo
+                for char in chars:
+                    if char in self.current_page.pdf_character:
+                        self.current_page.pdf_character.remove(char)
+
+        except Exception as e:
+            logger.warning("Failed to create text logo for '%s': %s", text, e)

@@ -177,6 +177,94 @@ class PdfInlineForm:
 
 
 @dataclass(slots=True)
+class PdfImage:
+    class Meta:
+        name = "pdfImage"
+
+    box: Box | None = field(
+        default=None,
+        metadata={
+            "type": "Element",
+            "required": True,
+        },
+    )
+    image_data: str | None = field(
+        default=None,
+        metadata={
+            "name": "imageData",
+            "type": "Attribute",
+            "required": True,
+        },
+    )
+    image_format: str | None = field(
+        default=None,
+        metadata={
+            "name": "imageFormat",
+            "type": "Attribute",
+            "required": True,
+        },
+    )
+    xobj_id: int | None = field(
+        default=None,
+        metadata={
+            "name": "xobjId",
+            "type": "Attribute",
+        },
+    )
+    render_order: int | None = field(
+        default=None,
+        metadata={
+            "name": "renderOrder",
+            "type": "Attribute",
+        },
+    )
+
+
+@dataclass(slots=True)
+class PdfDrawing:
+    class Meta:
+        name = "pdfDrawing"
+
+    box: Box | None = field(
+        default=None,
+        metadata={
+            "type": "Element",
+            "required": True,
+        },
+    )
+    graphic_state: GraphicState | None = field(
+        default=None,
+        metadata={
+            "name": "graphicState",
+            "type": "Element",
+            "required": True,
+        },
+    )
+    drawing_commands: str | None = field(
+        default=None,
+        metadata={
+            "name": "drawingCommands",
+            "type": "Attribute",
+            "required": True,
+        },
+    )
+    xobj_id: int | None = field(
+        default=None,
+        metadata={
+            "name": "xobjId",
+            "type": "Attribute",
+        },
+    )
+    render_order: int | None = field(
+        default=None,
+        metadata={
+            "name": "renderOrder",
+            "type": "Attribute",
+        },
+    )
+
+
+@dataclass(slots=True)
 class PdfMatrix:
     class Meta:
         name = "pdfMatrix"
@@ -556,6 +644,49 @@ class PdfStyle:
         metadata={
             "type": "Attribute",
             "required": True,
+        },
+    )
+
+
+@dataclass(slots=True)
+class PdfTextLogo:
+    class Meta:
+        name = "pdfTextLogo"
+
+    box: Box | None = field(
+        default=None,
+        metadata={
+            "type": "Element",
+            "required": True,
+        },
+    )
+    pdf_style: PdfStyle | None = field(
+        default=None,
+        metadata={
+            "name": "pdfStyle",
+            "type": "Element",
+            "required": True,
+        },
+    )
+    text: str | None = field(
+        default=None,
+        metadata={
+            "type": "Attribute",
+            "required": True,
+        },
+    )
+    xobj_id: int | None = field(
+        default=None,
+        metadata={
+            "name": "xobjId",
+            "type": "Attribute",
+        },
+    )
+    render_order: int | None = field(
+        default=None,
+        metadata={
+            "name": "renderOrder",
+            "type": "Attribute",
         },
     )
 
@@ -1271,6 +1402,27 @@ class Page:
         default_factory=list,
         metadata={
             "name": "pdfForm",
+            "type": "Element",
+        },
+    )
+    pdf_image: list[PdfImage] = field(
+        default_factory=list,
+        metadata={
+            "name": "pdfImage",
+            "type": "Element",
+        },
+    )
+    pdf_drawing: list[PdfDrawing] = field(
+        default_factory=list,
+        metadata={
+            "name": "pdfDrawing",
+            "type": "Element",
+        },
+    )
+    pdf_text_logo: list[PdfTextLogo] = field(
+        default_factory=list,
+        metadata={
+            "name": "pdfTextLogo",
             "type": "Element",
         },
     )
