@@ -52,6 +52,10 @@ dependencies = [
     "scipy>=1.15.3",
     "uharfbuzz>=0.50.2",
     "scikit-learn>=1.7.1",
+    "python-dotenv>=1.2.1",
+    "fastapi>=0.128.0",
+    "uvicorn>=0.40.0",
+    "python-multipart>=0.0.21",
 ]
 
 [project.optional-dependencies]

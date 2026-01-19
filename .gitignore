@@ -9,6 +9,7 @@ babel-backend/.env
 
 # Documentation files
 babel-backend/IMAGE_EXTRACTION_IMPLEMENTATION.md
+BOLD_FIX_DOCUMENTATION.md
 
 .venv
 env/

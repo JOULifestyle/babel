@@ -671,6 +671,15 @@ class ILTranslator:
                     page_font_map[paragraph.pdf_style.font_id],
                     "1",
                 )
+                comp_font = page_font_map[composition.pdf_same_style_characters.pdf_style.font_id]
+                para_font = page_font_map[paragraph.pdf_style.font_id]
+                logger.debug(
+                    f"Comparing styles: comp_font_id={composition.pdf_same_style_characters.pdf_style.font_id}, "
+                    f"para_font_id={paragraph.pdf_style.font_id}, "
+                    f"comp_bold={comp_font.bold}, para_bold={para_font.bold}, "
+                    f"comp_italic={comp_font.italic}, para_italic={para_font.italic}, "
+                    f"fonta_bold={fonta.is_bold if fonta else None}, fontb_bold={fontb.is_bold if fontb else None}"
+                )
                 if (
                     # 样式和段落基准样式一致，无需占位符
                     is_same_style(
@@ -683,7 +692,7 @@ class ILTranslator:
                         paragraph.pdf_style,
                     )
                     or (
-                        # 除了字体以外样式都和基准一样，并且字体都映射到同一个字体。无需占位符
+                        # 除了字体以外样式都和基准一样，并且字体都映射到同一个字体，且粗体斜体相同。无需占位符
                         is_same_style_except_font(
                             composition.pdf_same_style_characters.pdf_style,
                             paragraph.pdf_style,
@@ -691,11 +700,15 @@ class ILTranslator:
                         and fonta
                         and fontb
                         and fonta.font_id == fontb.font_id
+                        and fonta.is_bold == fontb.is_bold
+                        and fonta.is_italic == fontb.is_italic
                     )
                     # or len(composition.pdf_same_style_characters.pdf_character) == 1
                 ):
+                    logger.debug(f"Styles considered same, no placeholder for '{get_char_unicode_string(composition.pdf_same_style_characters.pdf_character)}'")
                     chars.extend(composition.pdf_same_style_characters.pdf_character)
                     continue
+                logger.debug(f"Styles different, creating placeholder for '{get_char_unicode_string(composition.pdf_same_style_characters.pdf_character)}'")
                 placeholder = self.create_rich_text_placeholder(
                     composition.pdf_same_style_characters,
                     placeholder_id,

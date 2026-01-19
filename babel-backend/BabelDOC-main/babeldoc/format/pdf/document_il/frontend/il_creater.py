@@ -1053,6 +1053,15 @@ class ILCreater:
             italic = None
             monospaced = None
             serif = None
+
+        # Fallback bold/italic detection based on font name
+        if not bold:
+            bold = (("Bold" in font_name) or ("-B" in font_name))
+        if not italic:
+            italic = (("Italic" in font_name) or ("-I" in font_name) or ("Oblique" in font_name))
+
+        logger.debug(f"Font {font_name} @ {xref_id}: bold={bold}, italic={italic}")
+
         il_font_metadata = il_version_1.PdfFont(
             name=font_name,
             xref_id=xref_id,
