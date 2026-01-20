@@ -255,7 +255,7 @@ class ILTranslatorLLMOnly:
         )
 
     def _is_body_text_paragraph(self, paragraph: PdfParagraph) -> bool:
-        """判断正文段落（当前仅 layout_label == 'text'）。
+        """判断正文段落（包括文本和页脚内容）。
 
         Args:
             paragraph: PDF paragraph to check
@@ -263,11 +263,22 @@ class ILTranslatorLLMOnly:
         Returns:
             True if this is a body text paragraph, False otherwise
         """
-        return paragraph.layout_label in (
+        # Include all text-like layout labels to ensure footer content is translated
+        text_like_labels = {
             "text",
             "plain text",
             "paragraph_hybrid",
-        )
+            "footer",
+            "page_footer",
+            "page_footer_hybrid",
+            "paragraph",
+            "content",
+            "caption",
+            "figure_text",
+            "footnote",
+            "footnote_hybrid",
+        }
+        return paragraph.layout_label in text_like_labels
 
     def _should_translate_paragraph(
         self,

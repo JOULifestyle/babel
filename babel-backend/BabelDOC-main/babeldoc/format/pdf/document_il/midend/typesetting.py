@@ -1127,6 +1127,36 @@ class Typesetting:
                 scale -= 0.1
 
             if scale < 0.7:
+                # For structured paragraphs that should preserve line structure, don't expand the box
+                # and don't scale down further - allow horizontal overflow
+                if getattr(paragraph, 'preserve_line_structure', False):
+                    logger.info(f"Not expanding box or scaling for structured paragraph {getattr(paragraph, 'debug_id', 'unknown')} - allowing overflow")
+                    # Set scale back to 0.7 and apply layout to allow overflow
+                    scale = 0.7
+                    typeset_units, all_units_fit = self._layout_typesetting_units(
+                        typesetting_units,
+                        box,
+                        scale,
+                        line_skip,
+                        paragraph,
+                        use_english_line_break,
+                    )
+                    if apply_layout:
+                        paragraph.scale = scale
+                        paragraph.pdf_paragraph_composition = []
+                        for unit in typeset_units:
+                            chars, curves, forms = unit.render()
+                            for char in chars:
+                                paragraph.pdf_paragraph_composition.append(
+                                    PdfParagraphComposition(pdf_character=char),
+                                )
+                            for curve in curves:
+                                page.pdf_curve.append(curve)
+                            for form in forms:
+                                page.pdf_form.append(form)
+                    return scale, typeset_units if apply_layout else None
+                    continue
+
                 space_expanded = False  # 标记是否成功扩展了空间
 
                 if expand_space_flag == 0:
@@ -1217,13 +1247,22 @@ class Typesetting:
         if not paragraph.box:
             return
 
+        # For structured paragraphs, disable English line breaking and use uniform scaling
+        is_structured = getattr(paragraph, 'preserve_line_structure', False)
+        effective_use_english_line_break = use_english_line_break and not is_structured
+
+        # For structured paragraphs, use fixed uniform scaling to ensure consistent appearance
+        effective_precomputed_scale = precomputed_scale
+        if is_structured:
+            effective_precomputed_scale = 0.6  # Fixed uniform scaling for all structured content
+
         # 使用通用方法进行排版，传入预计算的缩放因子作为初始值
         self._find_optimal_scale_and_layout(
             paragraph,
             page,
             typesetting_units,
-            precomputed_scale,
-            use_english_line_break,
+            effective_precomputed_scale,
+            effective_use_english_line_break,
             apply_layout=True,
         )
 
@@ -1424,7 +1463,23 @@ class Typesetting:
         ],
     ):
         # Check for preserve_line_structure flag for structured content
-        if getattr(paragraph, 'preserve_line_structure', False):
+        preserve_flag = getattr(paragraph, 'preserve_line_structure', False)
+
+        # Also check if the paragraph text starts with list markers (post-translation detection)
+        is_list_item = False
+        if paragraph.unicode:
+            import re
+            # Expanded regex for post-translation list detection
+            if re.match(r'^\s*(\d+\.|\d+\)|\d+\-|[a-zA-Z]\.|[a-zA-Z]\)|[a-zA-Z]\-|\•|\-|\*|[ivxlcdm]+\.|[IVXLCDM]+\.|\(\d+\)|\([a-zA-Z]\))\s', paragraph.unicode.strip()):
+                is_list_item = True
+                preserve_flag = True
+
+        print(f"DEBUG: Rendering paragraph {getattr(paragraph, 'debug_id', 'unknown')} at y={paragraph.box.y:.1f}, preserve_line_structure={preserve_flag}, is_list_item={is_list_item}")
+        if preserve_flag:
+            print(f"DEBUG: Using structured rendering for {getattr(paragraph, 'debug_id', 'unknown')}")
+            self._render_structured_paragraph(paragraph, page, fonts)
+            return
+            logger.info(f"Rendering structured paragraph {getattr(paragraph, 'debug_id', 'unknown')} at y={paragraph.box.y:.1f}")
             self._render_structured_paragraph(paragraph, page, fonts)
             return
         
@@ -1625,27 +1680,43 @@ class Typesetting:
             
             total_unit_width = unit_width + extra_width
             
-            # Check for English line break lookahead
-            width_lookahead = 0.0
-            if use_english_line_break:
-                width_lookahead = self._get_width_before_next_break_point(
-                    typesetting_units[idx:], scale
-                )
-            
-            # Check mixed char spacing (simplified for lookahead)
-            # strictly, we should check previous unit in buffer, but simplified here
-            
-            # 2. Determine Line Break
-            # If adding this unit (plus lookahead) exceeds box width...
-            # OR if logic enforces break
-            should_break = False
-            
-            if not unit.is_hung_punctuation and (
-                (current_line_width + total_unit_width > (box.x2 - box.x))
-                or (use_english_line_break and current_line_width + total_unit_width + width_lookahead > (box.x2 - box.x))
-                or (unit.is_cannot_appear_in_line_end_punctuation and current_line_width + total_unit_width * 2 > (box.x2 - box.x))
-            ):
-                 should_break = True
+            # For structured paragraphs, don't break lines - allow horizontal overflow
+            is_structured = getattr(paragraph, 'preserve_line_structure', False)
+
+            if not is_structured:
+                # Check for English line break lookahead
+                width_lookahead = 0.0
+                if use_english_line_break:
+                    width_lookahead = self._get_width_before_next_break_point(
+                        typesetting_units[idx:], scale
+                    )
+
+                # Check mixed char spacing (simplified for lookahead)
+                # strictly, we should check previous unit in buffer, but simplified here
+
+                # 2. Determine Line Break
+                # If adding this unit (plus lookahead) exceeds box width...
+                # OR if logic enforces break
+                should_break = False
+
+                if not unit.is_hung_punctuation and (
+                    (current_line_width + total_unit_width > (box.x2 - box.x))
+                    or (use_english_line_break and current_line_width + total_unit_width + width_lookahead > (box.x2 - box.x))
+                    or (unit.is_cannot_appear_in_line_end_punctuation and current_line_width + total_unit_width * 2 > (box.x2 - box.x))
+                ):
+                     should_break = True
+            else:
+                # For structured paragraphs, allow horizontal extension but constrain to page width
+                # Get page width (assuming standard page width, could be made dynamic)
+                page_width = 595.0  # Standard A4 width in points
+                max_width = page_width - box.x  # From current position to page edge
+
+                should_break = False
+
+                if not unit.is_hung_punctuation and (
+                    current_line_width + total_unit_width > max_width
+                ):
+                     should_break = True
             
             if should_break:
                 # 3. Process the Buffered Line

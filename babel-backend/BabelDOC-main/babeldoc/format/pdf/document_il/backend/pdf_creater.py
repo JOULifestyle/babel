@@ -399,6 +399,16 @@ class DrawingRenderUnit(RenderUnit):
             import ast
             drawing_data = ast.literal_eval(drawing.drawing_commands)
 
+            # Skip rendering if drawing data is malformed or empty
+            if not drawing_data or not isinstance(drawing_data, dict):
+                logger.debug("Skipping malformed drawing: invalid data structure")
+                return
+
+            items = drawing_data.get("items", [])
+            if not items:
+                logger.debug("Skipping empty drawing")
+                return
+
             draw_op.append(b"q n ")
 
             draw_op.append(
@@ -411,7 +421,7 @@ class DrawingRenderUnit(RenderUnit):
             commands = []
             current_point = None
 
-            for item in drawing_data.get("items", []):
+            for item in items:
                 if len(item) < 2:
                     continue
 
@@ -465,9 +475,9 @@ class DrawingRenderUnit(RenderUnit):
             draw_op.append(b" Q\n")
 
         except Exception as e:
-            logger.warning(f"Failed to render drawing: {e}")
-            # Fallback: just close the graphics state
-            draw_op.append(b" Q\n")
+            logger.debug(f"Skipping malformed drawing: {e}")
+            # Don't render anything for malformed drawings
+            return
 
 
 class TextLogoRenderUnit(RenderUnit):
@@ -852,7 +862,7 @@ class PDFCreater:
         # Collect all characters (from page and paragraphs)
         # Only use original page.pdf_character if there are no translated paragraphs
         # When paragraphs exist, they contain the translated text that replaces the original
-        # 
+        #
         # NOTE: Characters skipped from paragraph processing (like isolated formulas)
         # remain in page.pdf_character. These are NOT rendered here because they have
         # original positions that may conflict with translated text positions.
@@ -862,9 +872,16 @@ class PDFCreater:
         if page.pdf_paragraph:
             # Use translated paragraph characters
             for paragraph in page.pdf_paragraph:
+                layout_label = getattr(paragraph, "layout_label", None)
                 # Skip paragraphs that are marked to be abandoned (e.g. OCR artifacts, ghost text)
-                if getattr(paragraph, "layout_label", None) == "abandon":
-                    continue
+                # But preserve footer-like content that was incorrectly marked as abandon
+                if layout_label == "abandon":
+                    # Check if this looks like footer content that should be preserved
+                    unicode_text = getattr(paragraph, "unicode", "")
+                    footer_keywords = ["elsevier", "applied energy", "benini", "giacometti", "0306-2619", "www.elsevier.com", "droits réservés", "all rights reserved", "doi:"]
+                    is_footer_content = any(keyword.lower() in unicode_text.lower() for keyword in footer_keywords)
+                    if not is_footer_content:
+                        continue
                 chars.extend(self.render_paragraph_to_char(paragraph))
             
             # ALSO include original characters that were skipped from paragraphs (like formulas)
@@ -944,21 +961,21 @@ class PDFCreater:
                         CurveRenderUnit(curve, render_order, sub_render_order)
                     )
 
-        # Convert images to render units
-        for i, image in enumerate(page.pdf_image):
-            render_order = getattr(image, "render_order", 30)  # Images render after curves
-            sub_render_order = getattr(image, "sub_render_order", i)
-            render_units.append(
-                ImageRenderUnit(image, render_order, sub_render_order)
-            )
+        # Convert images to render units (disabled due to reconstruction artifacts)
+        # for i, image in enumerate(page.pdf_image):
+        #     render_order = getattr(image, "render_order", 30)  # Images render after curves
+        #     sub_render_order = getattr(image, "sub_render_order", i)
+        #     render_units.append(
+        #         ImageRenderUnit(image, render_order, sub_render_order)
+        #     )
 
-        # Convert drawings to render units
-        for i, drawing in enumerate(page.pdf_drawing):
-            render_order = getattr(drawing, "render_order", 25)  # Drawings render after curves, before images
-            sub_render_order = getattr(drawing, "sub_render_order", i)
-            render_units.append(
-                DrawingRenderUnit(drawing, render_order, sub_render_order)
-            )
+        # Convert drawings to render units (disabled due to malformed artifacts)
+        # for i, drawing in enumerate(page.pdf_drawing):
+        #     render_order = getattr(drawing, "render_order", 25)  # Drawings render after curves, before images
+        #     sub_render_order = getattr(drawing, "sub_render_order", i)
+        #     render_units.append(
+        #         DrawingRenderUnit(drawing, render_order, sub_render_order)
+        #     )
 
         # Convert text logos to render units
         for i, text_logo in enumerate(page.pdf_text_logo):

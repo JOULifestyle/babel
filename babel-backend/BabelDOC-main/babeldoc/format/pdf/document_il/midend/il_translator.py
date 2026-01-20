@@ -27,6 +27,7 @@ from babeldoc.format.pdf.document_il.utils.fontmap import FontMapper
 from babeldoc.format.pdf.document_il.utils.layout_helper import get_char_unicode_string
 from babeldoc.format.pdf.document_il.utils.layout_helper import get_paragraph_unicode
 from babeldoc.format.pdf.document_il.utils.layout_helper import is_same_style
+from babeldoc.format.pdf.document_il.utils.layout_helper import BULLET_POINT_PATTERN
 from babeldoc.format.pdf.document_il.utils.layout_helper import (
     is_same_style_except_font,
 )
@@ -57,8 +58,9 @@ PROMPT_TEMPLATE = Template(
    - Translate human-readable text inside tags.
    - Do NOT translate text inside <code>…</code>.
 3. Do NOT translate or alter placeholders: {v1}, {name}, %s, %d, [[...]], %%...%%.
-4. If the entire input is pure code/identifiers, return it unchanged.
-5. Translate ALL human-readable content into $lang_out.
+4. Do NOT translate list markers: •, -, *, 1., 2., (a), (b), etc. Keep them as is.
+5. If the entire input is pure code/identifiers, return it unchanged.
+6. Translate ALL human-readable content into $lang_out.
 
 $glossary_block
 
@@ -127,6 +129,29 @@ class FormulaPlaceholder:
             "formula_chars": get_char_unicode_string(self.formula.pdf_character)
             if self.formula and self.formula.pdf_character
             else None,
+        }
+
+
+class BulletPlaceholder:
+    def __init__(
+        self,
+        placeholder_id: int,
+        bullet_char: str,
+        placeholder: str,
+        regex_pattern: str,
+    ):
+        self.id = placeholder_id
+        self.bullet_char = bullet_char
+        self.placeholder = placeholder
+        self.regex_pattern = regex_pattern
+
+    def to_dict(self) -> dict:
+        return {
+            "type": "bullet",
+            "id": self.id,
+            "placeholder": self.placeholder,
+            "regex_pattern": self.regex_pattern,
+            "bullet_char": self.bullet_char,
         }
 
 
@@ -971,6 +996,7 @@ class ILTranslator:
         if paragraph.vertical:
             return None, None
         tracker.set_pdf_unicode(paragraph.unicode)
+        logger.info(f"Paragraph {paragraph.debug_id}: '{paragraph.unicode[:100]}...'")
         if paragraph.xobj_id in xobj_font_map:
             page_font_map = xobj_font_map[paragraph.xobj_id]
         disable_rich_text_translate = (
@@ -1255,12 +1281,16 @@ class ILTranslator:
                         translate_input,
                     )
                     llm_translate_tracker.set_input(llm_prompt)
+                    if any(char in text for char in ['•', '■', '◆', '◇', '○', '●', '◦', '‣', '⁃', '▪', '▫', '∗', '†', '‡', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹', '⁰', '₁', '₂', '₃', '₄', '₅', '₆', '₇', '₈', '₉', '₀', 'ᵃ', 'ᵇ', 'ᶜ', 'ᵈ', 'ᵉ', 'ᶠ', 'ᵍ', 'ʰ', 'ⁱ', 'ʲ', 'ᵏ', 'ˡ', 'ᵐ', 'ⁿ', 'ᵒ', 'ᵖ', 'ʳ', 'ˢ', 'ᵗ', 'ᵘ', 'ᵛ', 'ʷ', 'ˣ', 'ʸ', 'ᶻ', '¶', '※', '⁑', '⁂', '⁕', '⁎', '⁜', '❧', '☙', '⁋', '‖', '‽', '', '', '·', '(', '[', '-', '–', '—']):
+                        logger.debug(f"LLM prompt for list: {llm_prompt}")
                     translated_text = self.translate_engine.llm_translate(
                         llm_prompt,
                         rate_limit_params={
                             "paragraph_token_count": paragraph_token_count
                         },
                     )
+                    if any(char in text for char in ['•', '■', '◆', '◇', '○', '●', '◦', '‣', '⁃', '▪', '▫', '∗', '†', '‡', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹', '⁰', '₁', '₂', '₃', '₄', '₅', '₆', '₇', '₈', '₉', '₀', 'ᵃ', 'ᵇ', 'ᶜ', 'ᵈ', 'ᵉ', 'ᶠ', 'ᵍ', 'ʰ', 'ⁱ', 'ʲ', 'ᵏ', 'ˡ', 'ᵐ', 'ⁿ', 'ᵒ', 'ᵖ', 'ʳ', 'ˢ', 'ᵗ', 'ᵘ', 'ᵛ', 'ʷ', 'ˣ', 'ʸ', 'ᶻ', '¶', '※', '⁑', '⁂', '⁕', '⁎', '⁜', '❧', '☙', '⁋', '‖', '‽', '', '', '·', '(', '[', '-', '–', '—']):
+                        logger.debug(f"LLM output for list: {translated_text}")
                     llm_translate_tracker.set_output(translated_text)
                 else:
                     translated_text = self.translate_engine.translate(
@@ -1270,6 +1300,11 @@ class ILTranslator:
                         },
                     )
                 translated_text = re.sub(r"[. 。…，]{20,}", ".", translated_text)
+
+                # Log for debugging list preservation
+                if any(char in paragraph.unicode for char in ['•', '■', '◆', '◇', '○', '●', '◦', '‣', '⁃', '▪', '▫', '∗', '†', '‡', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹', '⁰', '₁', '₂', '₃', '₄', '₅', '₆', '₇', '₈', '₉', '₀', 'ᵃ', 'ᵇ', 'ᶜ', 'ᵈ', 'ᵉ', 'ᶠ', 'ᵍ', 'ʰ', 'ⁱ', 'ʲ', 'ᵏ', 'ˡ', 'ᵐ', 'ⁿ', 'ᵒ', 'ᵖ', 'ʳ', 'ˢ', 'ᵗ', 'ᵘ', 'ᵛ', 'ʷ', 'ˣ', 'ʸ', 'ᶻ', '¶', '※', '⁑', '⁂', '⁕', '⁎', '⁜', '❧', '☙', '⁋', '‖', '‽', '', '', '·', '(', '[', '-', '–', '—']):
+                    logger.debug(f"List paragraph input: {text}")
+                    logger.debug(f"List paragraph output: {translated_text}")
 
                 # Post-translation processing
                 self.post_translate_paragraph(

@@ -179,22 +179,22 @@ class ParagraphFinder:
     def should_preserve_line_structure(self, paragraph: PdfParagraph) -> bool:
         """
         Detect if a paragraph has structured content that should preserve line boundaries.
-        
+
         This identifies nomenclatures, indices, glossaries, and similar content where
         each line is a semantically independent unit (e.g., "c = absolute velocity").
-        
+
         Heuristics:
         1. Multiple short lines (average line length < 50 chars)
         2. Lines don't end with sentence-ending punctuation
         3. Lines have regular vertical spacing (list-like)
         4. Lines start with symbols/single characters (index-like)
-        
+
         Returns:
             True if the paragraph should preserve line structure
         """
         if not paragraph.pdf_paragraph_composition:
             return False
-        
+
         # Extract lines from composition
         lines = []
         for comp in paragraph.pdf_paragraph_composition:
@@ -203,14 +203,31 @@ class ParagraphFinder:
                 line_box = comp.pdf_line.box
                 if line_text.strip():
                     lines.append((line_text, line_box))
-        
-        # Need at least 3 lines to detect structure
-        if len(lines) < 3:
+
+        logger.info(f"Checking paragraph {getattr(paragraph, 'debug_id', 'unknown')} with {len(lines)} lines")
+        if len(lines) >= 1:
+            for i, (text, box) in enumerate(lines[:3]):  # Log first 3 lines
+                logger.info(f"  Line {i}: '{text[:50]}...' at y={box.y:.1f}")
+
+        # Check for single-line list items
+        if len(lines) == 1:
+            text, _ = lines[0]
+            stripped = text.strip()
+            # Expanded regex to handle more list formats including Roman numerals
+            match = re.match(r'^\s*(\d+\.|\d+\)|\d+\-|[a-zA-Z]\.|[a-zA-Z]\)|[a-zA-Z]\-|\•|\-|\*|[ivxlcdm]+\.|[IVXLCDM]+\.|\(\d+\)|\([a-zA-Z]\))\s', stripped)
+            if match:
+                logger.warning(f"FOUND SINGLE-LINE LIST ITEM: '{stripped[:50]}...' - match: '{match.group(0)}' - preserving line structure")
+                return True
+            else:
+                logger.info(f"NO MATCH for single-line: '{stripped[:30]}...'")
+
+        # Need at least 2 lines to detect structure (lowered threshold)
+        if len(lines) < 2:
             return False
         
-        # Heuristic 1: Average line length is short (< 50 chars)
+        # Heuristic 1: Average line length - be more lenient for potential lists
         avg_line_length = sum(len(text) for text, _ in lines) / len(lines)
-        if avg_line_length > 50:
+        if avg_line_length > 80:  # Increased threshold for list detection
             return False
         
         # Heuristic 2: Most lines don't end with sentence punctuation
@@ -241,12 +258,35 @@ class ParagraphFinder:
         
         # Heuristic 4: Lines start with short tokens (symbols, letters, numbers)
         short_starts = sum(
-            1 for text, _ in lines 
+            1 for text, _ in lines
             if text.strip() and len(text.strip().split()[0]) <= 4
         )
         if short_starts > len(lines) * 0.6 and avg_line_length < 40:
             return True
-        
+
+        # Heuristic 5: Detect numbered or bulleted lists
+
+        list_markers = 0
+        for text, _ in lines:
+            stripped = text.strip()
+            # Expanded regex for multi-line detection
+            if re.match(r'^\s*(\d+\.|\d+\)|\d+\-|[a-zA-Z]\.|[a-zA-Z]\)|[a-zA-Z]\-|\•|\-|\*|[ivxlcdm]+\.|[IVXLCDM]+\.|\(\d+\)|\([a-zA-Z]\))\s', stripped):
+                list_markers += 1
+                logger.info(f"Found list marker in multi-line paragraph: '{stripped[:30]}...'")
+
+        # Lower threshold: at least 2 list items, or 1 if it's clearly a list-like structure
+        if list_markers >= 2:
+            logger.warning(f"DETECTED MULTI-LINE STRUCTURED PARAGRAPH with {list_markers} list markers - will explode")
+            return True
+        elif list_markers >= 1 and len(lines) >= 2:
+            # Check for list-like structure even with fewer markers
+            non_empty_lines = [text for text, _ in lines if text.strip()]
+            if len(non_empty_lines) >= 2:
+                # Check if lines have consistent short starts (potential list items)
+                short_starts = sum(1 for text in non_empty_lines if len(text.strip().split()[0]) <= 5)
+                if short_starts >= len(non_empty_lines) * 0.6:
+                    logger.warning(f"DETECTED LIST-LIKE STRUCTURE with {list_markers} markers and {short_starts}/{len(non_empty_lines)} short starts - will explode")
+                    return True
         return False
 
 
@@ -373,6 +413,12 @@ class ParagraphFinder:
             # image characters are not needed
             page.pdf_character = []
 
+        # Debug: check preserve_line_structure flags
+        for para in page.pdf_paragraph:
+            flag = getattr(para, 'preserve_line_structure', None)
+            if flag:
+                print(f"DEBUG: Paragraph {getattr(para, 'debug_id', 'unknown')} has preserve_line_structure={flag}")
+
         self.fix_overlapping_paragraphs(page)
 
         # 第六步：对每一行的字符进行排序
@@ -436,42 +482,63 @@ class ParagraphFinder:
         
         for paragraph in page.pdf_paragraph:
             if self.should_preserve_line_structure(paragraph):
-                # Explode this paragraph!
-                logger.info(f"Exploding structured paragraph {paragraph.debug_id} into line-paragraphs.")
-                
-                # Each composition (line) becomes its own paragraph
-                for composition in paragraph.pdf_paragraph_composition:
-                    if composition.pdf_line:
-                        # Create a new atomic paragraph for this line
-                        line_para = PdfParagraph(
-                            box=composition.pdf_line.box,
-                            pdf_style=paragraph.pdf_style,
-                            pdf_paragraph_composition=[composition],
-                            xobj_id=paragraph.xobj_id,
-                            unicode=get_char_unicode_string(composition.pdf_line.pdf_character),
-                            layout_label=paragraph.layout_label,
-                            layout_id=paragraph.layout_id,
-                            render_order=paragraph.render_order,
-                            debug_id=f"{paragraph.debug_id}_L{composition.pdf_line.box.y:.1f}"
-                        )
-                        # Mark it to skip reflow during typesetting
-                        line_para.preserve_line_structure = True
-                        # Backup original composition for restoration if needed (e.g. formulas)
-                        line_para.original_composition = [composition]
-                        new_paragraphs.append(line_para)
-                    else:
-                        # Keep non-line compositions as-is
-                        new_paragraphs.append(PdfParagraph(
-                            box=paragraph.box, # Fallback to parent box
-                            pdf_style=paragraph.pdf_style,
-                            pdf_paragraph_composition=[composition],
-                            xobj_id=paragraph.xobj_id,
-                            unicode=paragraph.unicode,
-                            layout_label=paragraph.layout_label,
-                            render_order=paragraph.render_order,
-                            debug_id=f"{paragraph.debug_id}_C"
-                        ))
-                exploded_count += 1
+                # Check if this is a multi-line paragraph that needs exploding
+                lines = []
+                for comp in paragraph.pdf_paragraph_composition:
+                    if comp.pdf_line and comp.pdf_line.pdf_character:
+                        line_text = get_char_unicode_string(comp.pdf_line.pdf_character)
+                        if line_text.strip():
+                            lines.append((line_text, comp.pdf_line.box))
+
+                if len(lines) > 1:
+                    # Explode this multi-line paragraph!
+                    logger.info(f"Exploding structured paragraph {paragraph.debug_id} into line-paragraphs.")
+
+                    # Debug: log the lines being exploded
+                    for comp in paragraph.pdf_paragraph_composition:
+                        if comp.pdf_line:
+                            line_text = get_char_unicode_string(comp.pdf_line.pdf_character)
+                            logger.info(f"  Exploding line: '{line_text[:50]}...' at y={comp.pdf_line.box.y:.1f}")
+
+                    # Each composition (line) becomes its own paragraph
+                    for composition in paragraph.pdf_paragraph_composition:
+                        if composition.pdf_line:
+                            # Create a new atomic paragraph for this line
+                            line_para = PdfParagraph(
+                                box=composition.pdf_line.box,
+                                pdf_style=paragraph.pdf_style,
+                                pdf_paragraph_composition=[composition],
+                                xobj_id=paragraph.xobj_id,
+                                unicode=get_char_unicode_string(composition.pdf_line.pdf_character),
+                                layout_label=paragraph.layout_label,
+                                layout_id=paragraph.layout_id,
+                                render_order=paragraph.render_order,
+                                debug_id=f"{paragraph.debug_id}_L{composition.pdf_line.box.y:.1f}"
+                            )
+                            # Mark it to skip reflow during typesetting
+                            line_para.preserve_line_structure = True
+                            # Backup original composition for restoration if needed (e.g. formulas)
+                            line_para.original_composition = [composition]
+                            new_paragraphs.append(line_para)
+                        else:
+                            # Keep non-line compositions as-is
+                            new_paragraphs.append(PdfParagraph(
+                                box=paragraph.box, # Fallback to parent box
+                                pdf_style=paragraph.pdf_style,
+                                pdf_paragraph_composition=[composition],
+                                xobj_id=paragraph.xobj_id,
+                                unicode=paragraph.unicode,
+                                layout_label=paragraph.layout_label,
+                                render_order=paragraph.render_order,
+                                debug_id=f"{paragraph.debug_id}_C"
+                            ))
+                    exploded_count += 1
+                else:
+                    # Single-line paragraph that should preserve structure
+                    logger.info(f"Marking single-line structured paragraph {paragraph.debug_id} for preservation")
+                    paragraph.preserve_line_structure = True
+                    print(f"DEBUG: Set preserve_line_structure=True for {paragraph.debug_id}")
+                    new_paragraphs.append(paragraph)
             else:
                 new_paragraphs.append(paragraph)
         
