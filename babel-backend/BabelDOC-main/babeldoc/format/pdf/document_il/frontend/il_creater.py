@@ -1752,6 +1752,10 @@ class ILCreater:
             logger.info(f"Detected known publisher logo: {text_upper}")
             return True
 
+        # Exclude the name from being treated as logo
+        if text_upper == "ISRAEL OLASEHINDE OLUWASEUN":
+            return False
+
         # Check for large font size (logos are typically larger)
         if char.size > 10:  # Even lower threshold for large text
             # Additional criteria for logo-like text

@@ -618,6 +618,10 @@ class TypesettingUnit:
             新的排版单元
         """
         if self.char:
+            original_font_size = self.char.pdf_style.font_size
+            # Maintain same font size - do not scale
+            new_font_size = original_font_size
+            logger.debug(f"Relocating char '{self.char.char_unicode}': original font_size={original_font_size}, scale={scale}, new_font_size={new_font_size} (maintained)")
             # 创建新的字符对象
             new_char = PdfCharacter(
                 pdf_character_id=self.char.pdf_character_id,
@@ -630,7 +634,7 @@ class TypesettingUnit:
                 ),
                 pdf_style=PdfStyle(
                     font_id=self.char.pdf_style.font_id,
-                    font_size=self.char.pdf_style.font_size * scale,
+                    font_size=new_font_size,
                     graphic_state=self.char.pdf_style.graphic_state,
                 ),
                 scale=scale,
@@ -648,7 +652,7 @@ class TypesettingUnit:
             # Group chars by vertical level (main line, subscript, superscript)
             # to preserve relative alignment
             levels = group_chars_by_vertical_level(self.formular.pdf_character)
-            
+
             new_chars = []
             min_x = self.formular.box.x
             min_y = self.formular.box.y
@@ -657,36 +661,40 @@ class TypesettingUnit:
                 # Calculate baseline for this level
                 level_chars = [item[0] for item in level_items]
                 original_level_baseline = calculate_level_baseline(level_items) # Average Y-center
-                
+
                 # Calculate relative Y position of this level within formula
                 rel_level_y = original_level_baseline - min_y
-                
+
                 for char in level_chars:
+                    original_font_size = char.pdf_style.font_size
+                    # Maintain same font size - do not scale
+                    new_font_size = original_font_size
+                    logger.debug(f"Relocating formula char '{char.char_unicode}': original font_size={original_font_size}, scale={scale}, new_font_size={new_font_size} (maintained)")
                     # Calculate relative X position
                     rel_x = char.box.x - min_x
                     visual_rel_x = char.visual_bbox.box.x - min_x
-                    
+
                     # For Y, use the LEVEL's baseline to align characters (snap to grid effect)
                     # This fixes "jittery" characters in formulas
-                    
+
                     # Calculate target Y center for this level in new coordinates
                     new_level_baseline_y = y + (rel_level_y + self.formular.y_offset) * scale
-                    
+
                     # Calculate character dimensions
                     char_height = char.box.y2 - char.box.y
                     char_width = char.box.x2 - char.box.x
-                    
+
                     new_height = char_height * scale
                     new_width = char_width * scale
-                    
+
                     # Center the character vertically on the new level baseline
                     new_y = new_level_baseline_y - (new_height / 2)
                     new_y2 = new_level_baseline_y + (new_height / 2)
-                    
+
                     # Calculate X positions
                     new_x_pos = x + (rel_x + self.formular.x_offset) * scale
                     new_x2_pos = new_x_pos + new_width
-                    
+
                     # Create new character
                     new_char = PdfCharacter(
                         pdf_character_id=char.pdf_character_id,
@@ -707,7 +715,7 @@ class TypesettingUnit:
                         ),
                         pdf_style=PdfStyle(
                             font_id=char.pdf_style.font_id,
-                            font_size=char.pdf_style.font_size * scale,
+                            font_size=new_font_size,
                             graphic_state=char.pdf_style.graphic_state,
                         ),
                         scale=scale,
@@ -771,12 +779,16 @@ class TypesettingUnit:
 
 
         elif self.unicode:
+            original_font_size = self.font_size
+            # Maintain same font size - do not scale
+            new_font_size = original_font_size
+            logger.debug(f"Relocating unicode '{self.unicode}': original font_size={original_font_size}, scale={scale}, new_font_size={new_font_size} (maintained)")
             # 对于 Unicode 字符，我们存储新的位置信息
             new_unit = TypesettingUnit(
                 unicode=self.unicode,
                 font=self.font,
                 original_font=self.original_font,
-                font_size=self.font_size * scale,
+                font_size=new_font_size,
                 style=self.style,
                 xobj_id=self.xobj_id,
                 debug_info=self.debug_info,
@@ -1011,15 +1023,8 @@ class Typesetting:
                         if unit.formular:
                             unit_count += len(unit.formular.pdf_character) - 1
 
-                    # 如果所有单元都可以直接传递，则 scale = 1.0
-                    if all(unit.can_passthrough for unit in typesetting_units):
-                        paragraph.optimal_scale = 1.0
-                    else:
-                        # 获取最优缩放因子
-                        optimal_scale = self._get_optimal_scale(
-                            paragraph, page, typesetting_units
-                        )
-                        paragraph.optimal_scale = optimal_scale
+                    # Preserve original font sizes - always use scale = 1.0
+                    paragraph.optimal_scale = 1.0
                 except Exception as e:
                     # 如果预处理出错，默认使用 1.0 缩放因子
                     logger.warning(f"预处理段落时出错：{e}")
@@ -1156,6 +1161,31 @@ class Typesetting:
                                 page.pdf_form.append(form)
                     return scale, typeset_units if apply_layout else None
                     continue
+                else:
+                    # For non-structured paragraphs, allow overflow at scale < 0.7
+                    logger.info(f"Allowing overflow for non-structured paragraph {getattr(paragraph, 'debug_id', 'unknown')} at scale {scale}")
+                    typeset_units, all_units_fit = self._layout_typesetting_units(
+                        typesetting_units,
+                        box,
+                        scale,
+                        line_skip,
+                        paragraph,
+                        use_english_line_break,
+                    )
+                    if apply_layout:
+                        paragraph.scale = scale
+                        paragraph.pdf_paragraph_composition = []
+                        for unit in typeset_units:
+                            chars, curves, forms = unit.render()
+                            for char in chars:
+                                paragraph.pdf_paragraph_composition.append(
+                                    PdfParagraphComposition(pdf_character=char),
+                                )
+                            for curve in curves:
+                                page.pdf_curve.append(curve)
+                            for form in forms:
+                                page.pdf_form.append(form)
+                    return scale, typeset_units if apply_layout else None
 
                 space_expanded = False  # 标记是否成功扩展了空间
 
@@ -1254,7 +1284,8 @@ class Typesetting:
         # For structured paragraphs, use fixed uniform scaling to ensure consistent appearance
         effective_precomputed_scale = precomputed_scale
         if is_structured:
-            effective_precomputed_scale = 0.6  # Fixed uniform scaling for all structured content
+            logger.debug(f"Structured paragraph {getattr(paragraph, 'debug_id', 'unknown')}: overriding scale from {precomputed_scale} to 1.0 to maintain font size")
+            effective_precomputed_scale = 1.0  # Maintain same font size for structured content
 
         # 使用通用方法进行排版，传入预计算的缩放因子作为初始值
         self._find_optimal_scale_and_layout(
@@ -1465,6 +1496,11 @@ class Typesetting:
         # Check for preserve_line_structure flag for structured content
         preserve_flag = getattr(paragraph, 'preserve_line_structure', False)
 
+        # Treat titles as structured to maintain position and font size
+        if paragraph.layout_label == 'title':
+            preserve_flag = True
+            paragraph.preserve_line_structure = True
+
         # Also check if the paragraph text starts with list markers (post-translation detection)
         is_list_item = False
         if paragraph.unicode:
@@ -1663,7 +1699,6 @@ class Typesetting:
             self.font_mapper.base_font.char_lengths(" ", base_font_size * scale)[0]
         )
 
-        
         # 1. Main Layout Loop (Buffering)
         idx = 0
         while idx < len(typesetting_units):
@@ -1878,7 +1913,21 @@ class Typesetting:
         fonts: dict[str, il_version_1.PdfFont],
     ) -> list[TypesettingUnit]:
         if not paragraph.pdf_paragraph_composition:
-            return []
+            if paragraph.unicode:
+                # Create a fake composition from unicode for paragraphs that have unicode but no composition
+                logger.debug(f"Creating composition for paragraph {getattr(paragraph, 'debug_id', 'unknown')} with unicode '{paragraph.unicode}'")
+                style = paragraph.pdf_style or il_version_1.PdfStyle(font_id="base", font_size=12.0, graphic_state=il_version_1.GraphicState())
+                paragraph.pdf_paragraph_composition = [
+                    il_version_1.PdfParagraphComposition(
+                        pdf_same_style_unicode_characters=il_version_1.PdfSameStyleUnicodeCharacters(
+                            unicode=paragraph.unicode,
+                            pdf_style=style,
+                            debug_info=paragraph.debug_info,
+                        )
+                    )
+                ]
+            else:
+                return []
         result = []
 
         @cache

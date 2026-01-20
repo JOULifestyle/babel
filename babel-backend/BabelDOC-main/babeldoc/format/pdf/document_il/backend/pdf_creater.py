@@ -1532,6 +1532,11 @@ class PDFCreater:
                     self.update_page_content_stream(
                         check_font_exists, page, pdf, translation_config
                     )
+                    # Set mediabox to cropbox to prevent content overflow
+                    pdf_page = pdf[page.page_number]
+                    crop_rect = page.cropbox.box
+                    if crop_rect and crop_rect.x is not None and crop_rect.y is not None and crop_rect.x2 is not None and crop_rect.y2 is not None and (crop_rect.x2 - crop_rect.x) > 0 and (crop_rect.y2 - crop_rect.y) > 0:
+                        pdf_page.set_mediabox(pymupdf.Rect(crop_rect.x, crop_rect.y, crop_rect.x2, crop_rect.y2))
                     pbar.advance()
             translation_config.raise_if_cancelled()
             gc_level = 1
@@ -1547,10 +1552,7 @@ class PDFCreater:
                     )
 
                 pbar.advance()
-            try:
-                self.restore_media_box(pdf, self.mediabox_data)
-            except Exception:
-                logger.exception("restore media box failed")
+            # Note: mediabox is already set to cropbox above, no need to restore original
 
             if translation_config.only_include_translated_page:
                 total_page = set(range(0, len(pdf)))
