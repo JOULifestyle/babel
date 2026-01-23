@@ -1510,7 +1510,17 @@ class Typesetting:
                 is_list_item = True
                 preserve_flag = True
 
-        print(f"DEBUG: Rendering paragraph {getattr(paragraph, 'debug_id', 'unknown')} at y={paragraph.box.y:.1f}, preserve_line_structure={preserve_flag}, is_list_item={is_list_item}")
+        # Check if paragraph contains translated content (unicode characters)
+        # This preserves font sizes for translated paragraphs
+        has_translated_content = any(
+            comp.pdf_same_style_unicode_characters is not None
+            for comp in paragraph.pdf_paragraph_composition
+        )
+        if has_translated_content:
+            preserve_flag = True
+            paragraph.preserve_line_structure = True
+
+        print(f"DEBUG: Rendering paragraph {getattr(paragraph, 'debug_id', 'unknown')} at y={paragraph.box.y:.1f}, preserve_line_structure={preserve_flag}, is_list_item={is_list_item}, has_translated_content={has_translated_content}")
         if preserve_flag:
             print(f"DEBUG: Using structured rendering for {getattr(paragraph, 'debug_id', 'unknown')}")
             self._render_structured_paragraph(paragraph, page, fonts)

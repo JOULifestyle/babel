@@ -182,18 +182,28 @@ class ParagraphFinder:
 
         This identifies nomenclatures, indices, glossaries, and similar content where
         each line is a semantically independent unit (e.g., "c = absolute velocity").
+        Also detects multi-line centered titles that should be treated as single units.
+        Additionally detects footer content that should preserve fragment structure.
 
         Heuristics:
         1. Multiple short lines (average line length < 50 chars)
         2. Lines don't end with sentence-ending punctuation
         3. Lines have regular vertical spacing (list-like)
         4. Lines start with symbols/single characters (index-like)
+        5. Lines are horizontally centered (centered titles)
+        6. Footer layout labels (footer, page_footer, etc.)
 
         Returns:
             True if the paragraph should preserve line structure
         """
         if not paragraph.pdf_paragraph_composition:
             return False
+
+        # Check for footer layout labels - these should preserve structure
+        footer_labels = {"footer", "page_footer", "page_footer_hybrid"}
+        if paragraph.layout_label in footer_labels:
+            logger.info(f"Detected footer paragraph {getattr(paragraph, 'debug_id', 'unknown')} with layout {paragraph.layout_label} - preserving line structure")
+            return True
 
         # Extract lines from composition
         lines = []
@@ -224,26 +234,47 @@ class ParagraphFinder:
         # Need at least 2 lines to detect structure (lowered threshold)
         if len(lines) < 2:
             return False
-        
+
+        # Heuristic 0: Check for centered multi-line text (titles)
+        if self._are_lines_centered(lines):
+            logger.warning(f"DETECTED CENTERED MULTI-LINE TEXT - preserving as single unit")
+            return True
+
         # Heuristic 1: Average line length - be more lenient for potential lists
         avg_line_length = sum(len(text) for text, _ in lines) / len(lines)
+
+        # Heuristic 5: Detect numbered or bulleted lists FIRST (before length check)
+        list_markers = 0
+        for text, _ in lines:
+            stripped = text.strip()
+            # Expanded regex for multi-line detection
+            if re.match(r'^\s*(\d+\.|\d+\)|\d+\-|[a-zA-Z]\.|[a-zA-Z]\)|[a-zA-Z]\-|\•|\-|\*|[ivxlcdm]+\.|[IVXLCDM]+\.|\(\d+\)|\([a-zA-Z]\))\s', stripped):
+                list_markers += 1
+                logger.info(f"Found list marker in multi-line paragraph: '{stripped[:30]}...'")
+
+        # If we have multiple list markers, this is definitely a list regardless of length
+        if list_markers >= 2:
+            logger.warning(f"DETECTED MULTI-LINE STRUCTURED PARAGRAPH with {list_markers} list markers - will explode")
+            return True
+
+        # For single list markers or no markers, apply length restrictions
         if avg_line_length > 80:  # Increased threshold for list detection
             return False
-        
+
         # Heuristic 2: Most lines don't end with sentence punctuation
         sentence_endings = sum(
-            1 for text, _ in lines 
+            1 for text, _ in lines
             if text.rstrip() and text.rstrip()[-1] in '.!?;:'
         )
         if sentence_endings > len(lines) * 0.5:
             return False
-        
+
         # Heuristic 3: Check for regular vertical spacing (list-like)
         if len(lines) >= 3:
             y_positions = [box.y for _, box in lines if box]
             if len(y_positions) >= 3:
                 y_gaps = [
-                    abs(y_positions[i+1] - y_positions[i]) 
+                    abs(y_positions[i+1] - y_positions[i])
                     for i in range(len(y_positions) - 1)
                 ]
                 if y_gaps:
@@ -255,7 +286,7 @@ class ParagraphFinder:
                         if std_dev < avg_gap * 0.3:
                             # Uniform spacing detected - likely a list/index
                             return True
-        
+
         # Heuristic 4: Lines start with short tokens (symbols, letters, numbers)
         short_starts = sum(
             1 for text, _ in lines
@@ -264,20 +295,7 @@ class ParagraphFinder:
         if short_starts > len(lines) * 0.6 and avg_line_length < 40:
             return True
 
-        # Heuristic 5: Detect numbered or bulleted lists
-
-        list_markers = 0
-        for text, _ in lines:
-            stripped = text.strip()
-            # Expanded regex for multi-line detection
-            if re.match(r'^\s*(\d+\.|\d+\)|\d+\-|[a-zA-Z]\.|[a-zA-Z]\)|[a-zA-Z]\-|\•|\-|\*|[ivxlcdm]+\.|[IVXLCDM]+\.|\(\d+\)|\([a-zA-Z]\))\s', stripped):
-                list_markers += 1
-                logger.info(f"Found list marker in multi-line paragraph: '{stripped[:30]}...'")
-
-        # Lower threshold: at least 2 list items, or 1 if it's clearly a list-like structure
-        if list_markers >= 2:
-            logger.warning(f"DETECTED MULTI-LINE STRUCTURED PARAGRAPH with {list_markers} list markers - will explode")
-            return True
+        # Check for list-like structure with single marker
         elif list_markers >= 1 and len(lines) >= 2:
             # Check for list-like structure even with fewer markers
             non_empty_lines = [text for text, _ in lines if text.strip()]
@@ -288,6 +306,43 @@ class ParagraphFinder:
                     logger.warning(f"DETECTED LIST-LIKE STRUCTURE with {list_markers} markers and {short_starts}/{len(non_empty_lines)} short starts - will explode")
                     return True
         return False
+
+    def _are_lines_centered(self, lines: list[tuple[str, Box]]) -> bool:
+        """
+        Check if multiple lines are horizontally centered.
+
+        For centered text, the horizontal centers of all lines should be similar.
+        """
+        if len(lines) < 2:
+            return False
+
+        # Calculate horizontal centers for each line
+        centers = []
+        for text, box in lines:
+            if box:
+                center_x = (box.x + box.x2) / 2
+                centers.append(center_x)
+
+        if len(centers) < 2:
+            return False
+
+        # Check if all centers are within a tolerance of each other
+        # Use the median as reference and check variance
+        centers_sorted = sorted(centers)
+        median_center = centers_sorted[len(centers) // 2]
+
+        # Calculate the maximum deviation from median
+        max_deviation = max(abs(c - median_center) for c in centers)
+
+        # For centered text, allow small tolerance (e.g., 5 units)
+        tolerance = 5.0
+
+        is_centered = max_deviation <= tolerance
+
+        if is_centered:
+            logger.info(f"Lines are centered: centers={centers}, median={median_center:.1f}, max_deviation={max_deviation:.1f}")
+
+        return is_centered
 
 
     def add_debug_info(self, page: Page):
@@ -870,6 +925,119 @@ class ParagraphFinder:
 
         return np.cumsum(hist[:-1])
 
+    def _split_footer_by_horizontal_gaps(self, chars: list[PdfCharacter]) -> list[list[PdfCharacter]]:
+        """
+        Split footer characters into lines based on horizontal gaps.
+        Large gaps indicate separate text blocks that should be on different lines.
+        """
+        if not chars:
+            return [chars]
+
+        # Sort characters by x position
+        sorted_chars = sorted(chars, key=lambda c: c.visual_bbox.box.x)
+
+        # Calculate gaps between consecutive characters
+        lines = []
+        current_line = [sorted_chars[0]]
+
+        for i in range(1, len(sorted_chars)):
+            prev_char = sorted_chars[i-1]
+            curr_char = sorted_chars[i]
+
+            # Calculate the gap between the end of previous char and start of current char
+            gap = curr_char.visual_bbox.box.x - prev_char.visual_bbox.box.x2
+
+            # If gap is significant, start new line
+            # Use a very small threshold to detect spacing
+            gap_threshold = 1.0  # Fixed small threshold for any spacing
+
+            logger.debug(f"Footer gap between '{prev_char.char_unicode}' and '{curr_char.char_unicode}': {gap:.1f}, threshold: {gap_threshold:.1f}")
+
+            if gap > gap_threshold:
+                # Large gap detected, start new line
+                logger.debug(f"Large gap detected, starting new line at character {i}")
+                lines.append(current_line)
+                current_line = [curr_char]
+            else:
+                current_line.append(curr_char)
+
+        # Add the last line
+        if current_line:
+            lines.append(current_line)
+
+        # If no gaps were detected, try text-based splitting as fallback
+        if len(lines) == 1:
+            text_based_lines = self._split_footer_by_text_patterns(chars)
+            if len(text_based_lines) > 1:
+                logger.debug(f"Using text-based splitting for footer, found {len(text_based_lines)} lines")
+                return text_based_lines
+
+        return lines
+
+    def _split_footer_by_text_patterns(self, chars: list[PdfCharacter]) -> list[list[PdfCharacter]]:
+        """
+        Split footer characters into lines based on text patterns.
+        Look for patterns that indicate line breaks in footers.
+        """
+        if not chars:
+            return [chars]
+
+        # Get the full text
+        full_text = get_char_unicode_string(chars)
+        logger.debug(f"Footer text for pattern splitting: '{full_text}'")
+
+        # Patterns that indicate potential line breaks in footers
+        # Split before email addresses, phone numbers, addresses, etc.
+        split_patterns = [
+            r'(?=\bAdresse\b)',  # "Adresse" (Address in French)
+            r'(?=\bE-mail\b)',   # "E-mail"
+            r'(?=\bemail\b)',    # "email"
+            r'(?=\bTel\b)',      # "Tel" (Telephone)
+            r'(?=\bTél\b)',      # "Tél" (Telephone in French)
+            r'(?=\bfax\b)',      # "fax"
+            r'(?=\+\d)',         # Phone numbers starting with +
+            r'(?=\(\d)',         # Phone numbers in parentheses
+        ]
+
+        split_positions = []
+        for pattern in split_patterns:
+            for match in re.finditer(pattern, full_text, re.IGNORECASE):
+                split_positions.append(match.start())
+
+        if not split_positions:
+            logger.debug("No text patterns found for splitting footer")
+            return [chars]
+
+        # Sort and deduplicate split positions
+        split_positions = sorted(set(split_positions))
+
+        # Convert text positions to character indices
+        char_splits = []
+        text_pos = 0
+        for i, char in enumerate(chars):
+            char_len = len(char.char_unicode)
+            if any(pos >= text_pos and pos < text_pos + char_len for pos in split_positions):
+                char_splits.append(i)
+            text_pos += char_len
+
+        if not char_splits:
+            return [chars]
+
+        # Split characters at the identified positions
+        lines = []
+        start = 0
+        for split_pos in char_splits:
+            if split_pos > start:
+                lines.append(chars[start:split_pos])
+                start = split_pos
+
+        # Add remaining characters
+        if start < len(chars):
+            lines.append(chars[start:])
+
+        logger.debug(f"Text-based splitting resulted in {len(lines)} lines")
+        return lines
+
     def _split_paragraph_into_lines(
         self, paragraph: PdfParagraph, formula_font_ids: set[str]
     ):
@@ -913,7 +1081,11 @@ class ParagraphFinder:
         para_y_max = max(b["y2"] for b in char_y_bounds)
 
         # If the paragraph is vertically flat, treat it as a single line.
-        if (para_y_max - para_y_min) < 5:  # Using a small threshold
+        # But for footer paragraphs, try to split based on horizontal gaps even if vertically flat
+        footer_labels = {"footer", "page_footer", "page_footer_hybrid"}
+        is_footer = paragraph.layout_label in footer_labels
+
+        if (para_y_max - para_y_min) < 5 and not is_footer:  # Using a small threshold, but allow footer splitting
             # all_chars.sort(key=lambda c: c.visual_bbox.box.x)
             single_line_composition = self.create_line(all_chars)
             paragraph.pdf_paragraph_composition = [
@@ -921,6 +1093,27 @@ class ParagraphFinder:
             ] + other_compositions
             self.update_paragraph_data(paragraph)
             return
+        elif is_footer and (para_y_max - para_y_min) < 5:
+            # For footer paragraphs that are vertically flat, split based on horizontal gaps
+            logger.info(f"Attempting to split footer paragraph {getattr(paragraph, 'debug_id', 'unknown')} with {len(all_chars)} characters")
+            lines = self._split_footer_by_horizontal_gaps(all_chars)
+            logger.info(f"Footer splitting resulted in {len(lines)} lines")
+            if len(lines) > 1:
+                paragraph.pdf_paragraph_composition = [
+                    self.create_line(line_chars) for line_chars in lines
+                ] + other_compositions
+                self.update_paragraph_data(paragraph)
+                logger.info(f"Successfully split footer into {len(lines)} lines")
+                return
+            else:
+                # Fall back to single line if no gaps detected
+                logger.info("No gaps detected in footer, keeping as single line")
+                single_line_composition = self.create_line(all_chars)
+                paragraph.pdf_paragraph_composition = [
+                    single_line_composition
+                ] + other_compositions
+                self.update_paragraph_data(paragraph)
+                return
 
         # 3. Perform "threading" scan to create a collision histogram.
         # Scan from top (max y) to bottom (min y) with a step of 0.5.
